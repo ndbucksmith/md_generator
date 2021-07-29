@@ -8,7 +8,7 @@ copyright 2020 buck smith
 import datetime
 import time
 from typing import List, Tuple, Union
-
+import numpy as np
 import pyvisa as visa
 from vtf.util import log
 
@@ -329,51 +329,57 @@ class KeysightSMU(IInstrument):
         case id  01001406
         :param v_list: List of voltages to source
         :param aperature:
-        :return:
+        :return:  2D array of floats V,I,VI,??,?? by v_list length
         """
         self._session.write(f":sour1:func:mode volt")
-        self._session.write(f":sour2:func:mode volt")
+        self._session.write(f":sour2:func:mode curr")
+        self._session.write("FORM:ELEM:SENS VOLT,CURR")
         v_str = f"{v_list}"[1:-1]
+        # make a list of zero amp current source settings for channel 2
+        i_str = ""
+        for ix in range(len(v_list)):
+            i_str += "0.0,"
+        i_str = i_str[0:-1]
         self._session.write(f":sour1:list:volt {v_str}")
-        self._session.write(f":SENS1:CURR:PROT 0.5")
-        self._session.write(f":SENS2:CURR:PROT 0.0")
+        self._session.write(f":sour1:volt:mode list")
+        self._session.write(f":sour2:list:curr {i_str}")
+        self._session.write(f":sour2:curr:mode list")
+        actual_v_list = self._session.query("SOUR1:LIST:VOLT?")
+        actual_i_list = self._session.query("SOUR2:LIST:CURR?")
+        self._session.write(f":SENS1:CURR:PROT 0.2")
+        self._session.write(f":SENS2:VOLT:PROT 10.0")
+        # self._session.write(":SOUR2:FUNC:SHAP DC")
         self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini0")
-        self._session.write(":SENS2:CURR:PROT 0.0")
-        self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini")
-        self._session.write(':SENS1:FUNC:ON "VOLT","CURR"')
-        self._session.write(':SENS2:FUNC:ON "VOLT","CURR"')
+        self._session.write(':SENS1:FUNC "VOLT","CURR"')
+        self._session.write(':SENS2:FUNC "VOLT","CURR"')
         self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini2")
         self._session.write(f":SENS1:CURR:APER {aperature-0.01}")
         self._session.write(f":SENS2:CURR:APER {aperature-0.01}")
         self._session.write(f":SENS1:VOLT:APER {aperature-0.01}")
         self._session.write(f":SENS2:VOLT:APER {aperature-0.01}")
         self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini3")
-        self._session.write(f":ARM1:SOUR TIM")
-        self._session.write(f":ARM2:SOUR TIM")
+        # self._session.write(f":ARM1:SOUR AUTO")
+        # self._session.write(f":ARM2:SOUR AUTO")
         _count = len(v_list)
-        self._session.write(f":TRIG:ACQ:TIM {aperature}")
-        self._session.write(f":TRIG:ACQ:COUNT {_count}")
+        self._session.write(f":TRIG:SOUR TIM")
+        self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini32")
+        self._session.write(f":TRIG:TIM {aperature}")
+        self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini31")
+        self._session.write(f":TRIG:COUNT {_count}")
         self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini4")
         self._session.write(f":OUTP1 ON")
         self._session.write(f":OUTP2 ON")
         self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini5")
-        # self._session.write(f":INIT (@1)")
-     #   self._session.write(f":INIT (@2)")
-        self._session.write(":INIT:IMM:TRAN (@1,2)")
+        self._session.write(f":INIT")
         self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini6")
         time.sleep(_count*aperature)
         #resp_data = self._session.query("SENS:DATA?").split(',')
         resp_data = self._session.query("FETC:ARR? (@1,2)").split(',')
         print(f"{len(resp_data)} values read for list of {_count}")
-        float_data  = [float(val) for val in resp_data]
+        float_data = np.array([float(val) for val in resp_data])
+        float_data_resh = float_data.reshape((4, len(float_data)//4),  order='F')
         self.err_check(self._session.query(":SYST:ERR:CODE:ALL?"), id=f"ini4")
-        print(resp_data)
-        self.reset()
-        self.source_dcv(1,2.0, 0.2)
-        self.source_dcv(2,1.5, 0.2)
-        print(self.smu_meas(1, 0.25))
-        print(self.smu_meas(2, 0.25))
-        return float_data
+        return float_data_resh
 
     def err_query(self):
         return self._session.query(":SYST:ERR:CODE:ALL?")
@@ -469,7 +475,7 @@ def smu_test():
         model="E2902",
         serial_number="MY59002082",
         calibration_expiration="20210929",
-        hw_config={'smu_1':{'visa_addr':"TCPIP0::192.168.0.4::INSTR",
+        hw_config={'smu_1':{'visa_addr':"TCPIP0::192.168.50.4::INSTR",
                             'serial_number':"MY59002082",
                             'model':"E2902"}
                    }
@@ -481,16 +487,15 @@ def smu_test():
     values = smu.two_channel_qst(v_l, 0.04)
     print(values)
     print(smu.err_query())
-    m2s = smu.smu_meas("1", 0.5)
-    print("V,I ", m2s)
+    # smu.source_dcv(2, 3.0, 0.2)
+    # m1s = smu.smu_meas(2, 0.1)
+    # smu.source_dcv(1,4.0,0.5)
+    # m2s = smu.smu_meas(1, 0.1)
+    # print("V,I ", m2s)
+    m1s = smu.smu_meas(1, 0.1)
+    m12 = smu.smu_meas(2, 0.1)
+    m1s = smu.smu_meas(2, 0.1)
 
-    # for rx in range(2):
-    #     smu.reset()
-    #     time.sleep(1.0)
-    #     smu._svmi("1", 4.0, 2.0, 4.0)
-    #     for mx in range(10):
-    #         m2s = smu.smu_meas("1", 0.5)
-    #         print("V,I ", m2s)
 
 if __name__ == "__main__":
     smu_test()
